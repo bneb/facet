@@ -1,0 +1,450 @@
+// Facet Tiger Benchmark — Salt Implementation
+//
+// Renders a complex tiger scene (~30 paths, ~160 cubic Béziers)
+// onto a 512×512 canvas. Measures Salt's MLIR codegen against
+// equivalent C compiled with clang -O3.
+//
+// The tiger is algorithm-identical to bench_raster_c.c:
+//   - Same path coordinates
+//   - Same fill order
+//   - Same canvas dimensions
+//   - FNV-1a pixel checksum must match ("Golden Image" parity)
+
+package main
+
+import std.core.ptr.Ptr
+import std.time.Instant
+import facet.raster
+
+// ═══════════════════════════════════════════════════════════════
+// FNV-1a Pixel Checksum — DCE Prevention
+// ═══════════════════════════════════════════════════════════════
+
+fn canvas_checksum(c: &Canvas) -> i64 {
+    let mut hash: i64 = 0;
+    let total = (c.stride as i64) * (c.height as i64);
+    let mut i: i64 = 0;
+    while i < total {
+        let byte_val = c.pixels.offset(i).read() as i64;
+        hash = hash ^ byte_val;
+        hash = hash * 1099511628211;
+        i = i + 1;
+    }
+    return hash;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tiger Scene — Algorithm-identical to bench_raster_c.c
+//
+// Every coordinate matches the C version exactly.
+// ═══════════════════════════════════════════════════════════════
+
+fn build_tiger(c: &mut Canvas) {
+    // ── Head outline ──
+    let mut p = path_new();
+    path_move_to(&mut p, 256.0, 60.0);
+    path_cubic_to(&mut p, 380.0, 60.0, 460.0, 140.0, 460.0, 240.0);
+    path_cubic_to(&mut p, 460.0, 300.0, 440.0, 360.0, 400.0, 400.0);
+    path_cubic_to(&mut p, 370.0, 430.0, 320.0, 460.0, 256.0, 470.0);
+    path_cubic_to(&mut p, 192.0, 460.0, 142.0, 430.0, 112.0, 400.0);
+    path_cubic_to(&mut p, 72.0, 360.0, 52.0, 300.0, 52.0, 240.0);
+    path_cubic_to(&mut p, 52.0, 140.0, 132.0, 60.0, 256.0, 60.0);
+    path_close(&mut p);
+    fill_path(c, &p, 240, 144, 48, 255);  // 0xF09030FF
+    path_free(&mut p);
+
+    // ── Left ear ──
+    let mut p2 = path_new();
+    path_move_to(&mut p2, 120.0, 140.0);
+    path_cubic_to(&mut p2, 100.0, 80.0, 60.0, 30.0, 40.0, 20.0);
+    path_cubic_to(&mut p2, 20.0, 10.0, 30.0, 60.0, 50.0, 100.0);
+    path_cubic_to(&mut p2, 60.0, 120.0, 80.0, 150.0, 120.0, 160.0);
+    path_close(&mut p2);
+    fill_path(c, &p2, 240, 144, 48, 255);
+    path_free(&mut p2);
+
+    // ── Right ear ──
+    let mut p3 = path_new();
+    path_move_to(&mut p3, 392.0, 140.0);
+    path_cubic_to(&mut p3, 412.0, 80.0, 452.0, 30.0, 472.0, 20.0);
+    path_cubic_to(&mut p3, 492.0, 10.0, 482.0, 60.0, 462.0, 100.0);
+    path_cubic_to(&mut p3, 452.0, 120.0, 432.0, 150.0, 392.0, 160.0);
+    path_close(&mut p3);
+    fill_path(c, &p3, 240, 144, 48, 255);
+    path_free(&mut p3);
+
+    // ── Left inner ear (semi-transparent pink) ──
+    let mut p4 = path_new();
+    path_move_to(&mut p4, 115.0, 140.0);
+    path_cubic_to(&mut p4, 100.0, 95.0, 75.0, 55.0, 60.0, 45.0);
+    path_cubic_to(&mut p4, 50.0, 40.0, 55.0, 70.0, 65.0, 105.0);
+    path_cubic_to(&mut p4, 72.0, 125.0, 90.0, 148.0, 115.0, 155.0);
+    path_close(&mut p4);
+    fill_path(c, &p4, 255, 128, 160, 192);  // 0xFF80A0C0
+    path_free(&mut p4);
+
+    // ── Right inner ear ──
+    let mut p5 = path_new();
+    path_move_to(&mut p5, 397.0, 140.0);
+    path_cubic_to(&mut p5, 412.0, 95.0, 437.0, 55.0, 452.0, 45.0);
+    path_cubic_to(&mut p5, 462.0, 40.0, 457.0, 70.0, 447.0, 105.0);
+    path_cubic_to(&mut p5, 440.0, 125.0, 422.0, 148.0, 397.0, 155.0);
+    path_close(&mut p5);
+    fill_path(c, &p5, 255, 128, 160, 192);
+    path_free(&mut p5);
+
+    // ── Stripe 1: forehead left ──
+    let mut s1 = path_new();
+    path_move_to(&mut s1, 180.0, 90.0);
+    path_cubic_to(&mut s1, 175.0, 110.0, 155.0, 140.0, 140.0, 170.0);
+    path_cubic_to(&mut s1, 130.0, 190.0, 120.0, 200.0, 125.0, 180.0);
+    path_cubic_to(&mut s1, 135.0, 150.0, 160.0, 115.0, 185.0, 88.0);
+    path_close(&mut s1);
+    fill_path(c, &s1, 48, 32, 16, 255);  // 0x302010FF
+    path_free(&mut s1);
+
+    // ── Stripe 2: forehead center-left ──
+    let mut s2 = path_new();
+    path_move_to(&mut s2, 215.0, 75.0);
+    path_cubic_to(&mut s2, 210.0, 95.0, 200.0, 130.0, 195.0, 160.0);
+    path_cubic_to(&mut s2, 192.0, 175.0, 188.0, 185.0, 195.0, 165.0);
+    path_cubic_to(&mut s2, 202.0, 135.0, 212.0, 100.0, 218.0, 73.0);
+    path_close(&mut s2);
+    fill_path(c, &s2, 48, 32, 16, 255);
+    path_free(&mut s2);
+
+    // ── Stripe 3: forehead center-right ──
+    let mut s3 = path_new();
+    path_move_to(&mut s3, 297.0, 75.0);
+    path_cubic_to(&mut s3, 302.0, 95.0, 312.0, 130.0, 317.0, 160.0);
+    path_cubic_to(&mut s3, 320.0, 175.0, 324.0, 185.0, 317.0, 165.0);
+    path_cubic_to(&mut s3, 310.0, 135.0, 300.0, 100.0, 294.0, 73.0);
+    path_close(&mut s3);
+    fill_path(c, &s3, 48, 32, 16, 255);
+    path_free(&mut s3);
+
+    // ── Stripe 4: forehead right ──
+    let mut s4 = path_new();
+    path_move_to(&mut s4, 332.0, 90.0);
+    path_cubic_to(&mut s4, 337.0, 110.0, 357.0, 140.0, 372.0, 170.0);
+    path_cubic_to(&mut s4, 382.0, 190.0, 392.0, 200.0, 387.0, 180.0);
+    path_cubic_to(&mut s4, 377.0, 150.0, 352.0, 115.0, 327.0, 88.0);
+    path_close(&mut s4);
+    fill_path(c, &s4, 48, 32, 16, 255);
+    path_free(&mut s4);
+
+    // ── Stripe 5: left cheek ──
+    let mut s5 = path_new();
+    path_move_to(&mut s5, 100.0, 220.0);
+    path_cubic_to(&mut s5, 85.0, 250.0, 80.0, 290.0, 90.0, 320.0);
+    path_cubic_to(&mut s5, 95.0, 335.0, 100.0, 325.0, 95.0, 295.0);
+    path_cubic_to(&mut s5, 90.0, 265.0, 95.0, 240.0, 105.0, 218.0);
+    path_close(&mut s5);
+    fill_path(c, &s5, 48, 32, 16, 255);
+    path_free(&mut s5);
+
+    // ── Stripe 6: right cheek ──
+    let mut s6 = path_new();
+    path_move_to(&mut s6, 412.0, 220.0);
+    path_cubic_to(&mut s6, 427.0, 250.0, 432.0, 290.0, 422.0, 320.0);
+    path_cubic_to(&mut s6, 417.0, 335.0, 412.0, 325.0, 417.0, 295.0);
+    path_cubic_to(&mut s6, 422.0, 265.0, 417.0, 240.0, 407.0, 218.0);
+    path_close(&mut s6);
+    fill_path(c, &s6, 48, 32, 16, 255);
+    path_free(&mut s6);
+
+    // ── Stripe 7: left temple ──
+    let mut s7 = path_new();
+    path_move_to(&mut s7, 145.0, 100.0);
+    path_cubic_to(&mut s7, 130.0, 120.0, 110.0, 160.0, 100.0, 200.0);
+    path_cubic_to(&mut s7, 96.0, 215.0, 105.0, 210.0, 108.0, 195.0);
+    path_cubic_to(&mut s7, 118.0, 155.0, 135.0, 118.0, 150.0, 98.0);
+    path_close(&mut s7);
+    fill_path(c, &s7, 48, 32, 16, 255);
+    path_free(&mut s7);
+
+    // ── Stripe 8: right temple ──
+    let mut s8 = path_new();
+    path_move_to(&mut s8, 367.0, 100.0);
+    path_cubic_to(&mut s8, 382.0, 120.0, 402.0, 160.0, 412.0, 200.0);
+    path_cubic_to(&mut s8, 416.0, 215.0, 407.0, 210.0, 404.0, 195.0);
+    path_cubic_to(&mut s8, 394.0, 155.0, 377.0, 118.0, 362.0, 98.0);
+    path_close(&mut s8);
+    fill_path(c, &s8, 48, 32, 16, 255);
+    path_free(&mut s8);
+
+    // ── Muzzle (cream oval) ──
+    let mut muz = path_new();
+    let mcx: f32 = 256.0;
+    let mcy: f32 = 340.0;
+    let mrx: f32 = 90.0;
+    let mry: f32 = 70.0;
+    let mkx = 0.5523 * mrx;
+    let mky = 0.5523 * mry;
+    path_move_to(&mut muz, mcx + mrx, mcy);
+    path_cubic_to(&mut muz, mcx + mrx, mcy + mky, mcx + mkx, mcy + mry, mcx, mcy + mry);
+    path_cubic_to(&mut muz, mcx - mkx, mcy + mry, mcx - mrx, mcy + mky, mcx - mrx, mcy);
+    path_cubic_to(&mut muz, mcx - mrx, mcy - mky, mcx - mkx, mcy - mry, mcx, mcy - mry);
+    path_cubic_to(&mut muz, mcx + mkx, mcy - mry, mcx + mrx, mcy - mky, mcx + mrx, mcy);
+    path_close(&mut muz);
+    fill_path(c, &muz, 255, 240, 208, 255);  // 0xFFF0D0FF
+    path_free(&mut muz);
+
+    // ── Left eye (white) ──
+    let mut le = path_new();
+    let lecx: f32 = 190.0;
+    let lecy: f32 = 220.0;
+    let lerx: f32 = 45.0;
+    let lery: f32 = 35.0;
+    let lekx = 0.5523 * lerx;
+    let leky = 0.5523 * lery;
+    path_move_to(&mut le, lecx + lerx, lecy);
+    path_cubic_to(&mut le, lecx + lerx, lecy + leky, lecx + lekx, lecy + lery, lecx, lecy + lery);
+    path_cubic_to(&mut le, lecx - lekx, lecy + lery, lecx - lerx, lecy + leky, lecx - lerx, lecy);
+    path_cubic_to(&mut le, lecx - lerx, lecy - leky, lecx - lekx, lecy - lery, lecx, lecy - lery);
+    path_cubic_to(&mut le, lecx + lekx, lecy - lery, lecx + lerx, lecy - leky, lecx + lerx, lecy);
+    path_close(&mut le);
+    fill_path(c, &le, 255, 255, 255, 255);
+    path_free(&mut le);
+
+    // ── Right eye (white) ──
+    let mut re = path_new();
+    let recx: f32 = 322.0;
+    let recy: f32 = 220.0;
+    let rerx: f32 = 45.0;
+    let rery: f32 = 35.0;
+    let rekx = 0.5523 * rerx;
+    let reky = 0.5523 * rery;
+    path_move_to(&mut re, recx + rerx, recy);
+    path_cubic_to(&mut re, recx + rerx, recy + reky, recx + rekx, recy + rery, recx, recy + rery);
+    path_cubic_to(&mut re, recx - rekx, recy + rery, recx - rerx, recy + reky, recx - rerx, recy);
+    path_cubic_to(&mut re, recx - rerx, recy - reky, recx - lekx, recy - lery, recx, recy - lery);
+    path_cubic_to(&mut re, recx + rekx, recy - lery, recx + rerx, recx - reky, recx + rerx, recx);
+    path_close(&mut re);
+    fill_path(c, &re, 255, 255, 255, 255);
+    path_free(&mut re);
+
+    // ── Left pupil (black) ──
+    let mut lp = path_new();
+    let lpcx: f32 = 195.0;
+    let lpcy: f32 = 222.0;
+    let lpr: f32 = 18.0;
+    let lpk = 0.5523 * lpr;
+    path_move_to(&mut lp, lpcx + lpr, lpcy);
+    path_cubic_to(&mut lp, lpcx + lpr, lpcy + lpk, lpcx + lpk, lpcy + lpr, lpcx, lpcy + lpr);
+    path_cubic_to(&mut lp, lpcx - lpk, lpcy + lpr, lpcx - lpr, lpcy + lpk, lpcx - lpr, lpcy);
+    path_cubic_to(&mut lp, lpcx - lpr, lpcy - lpk, lpcx - lpk, lpcy - lpr, lpcx, lpcy - lpr);
+    path_cubic_to(&mut lp, lpcx + lpk, lpcy - lpr, lpcx + lpr, lpcy - lpk, lpcx + lpr, lpcy);
+    path_close(&mut lp);
+    fill_path(c, &lp, 16, 16, 16, 255);  // 0x101010FF
+    path_free(&mut lp);
+
+    // ── Right pupil (black) ──
+    let mut rp = path_new();
+    let rpcx: f32 = 317.0;
+    let rpcy: f32 = 222.0;
+    let rpr: f32 = 18.0;
+    let rpk = 0.5523 * rpr;
+    path_move_to(&mut rp, rpcx + rpr, rpcy);
+    path_cubic_to(&mut rp, rpcx + rpr, rpcy + rpk, rpcx + rpk, rpcy + rpr, rpcx, rpcy + rpr);
+    path_cubic_to(&mut rp, rpcx - rpk, rpcy + rpr, rpcx - rpr, rpcy + rpk, rpcx - rpr, rpcy);
+    path_cubic_to(&mut rp, rpcx - rpr, rpcy - rpk, rpcx - rpk, rpcy - lpr, rpcx, rpcy - rpr);
+    path_cubic_to(&mut rp, rpcx + rpk, rpcy - rpr, rpcx + rpr, rpcy - rpk, rpcx + rpr, rpcy);
+    path_close(&mut rp);
+    fill_path(c, &rp, 16, 16, 16, 255);
+    path_free(&mut rp);
+
+    // ── Nose ──
+    let mut nose = path_new();
+    path_move_to(&mut nose, 256.0, 290.0);
+    path_cubic_to(&mut nose, 268.0, 290.0, 280.0, 300.0, 280.0, 310.0);
+    path_cubic_to(&mut nose, 280.0, 320.0, 268.0, 330.0, 256.0, 330.0);
+    path_cubic_to(&mut nose, 244.0, 330.0, 232.0, 320.0, 232.0, 310.0);
+    path_cubic_to(&mut nose, 232.0, 300.0, 244.0, 290.0, 256.0, 290.0);
+    path_close(&mut nose);
+    fill_path(c, &nose, 48, 24, 24, 255);  // 0x301818FF
+    path_free(&mut nose);
+
+    // ── Upper mouth line ──
+    let mut ml = path_new();
+    path_move_to(&mut ml, 256.0, 330.0);
+    path_line_to(&mut ml, 256.0, 355.0);
+    path_cubic_to(&mut ml, 256.0, 358.0, 254.0, 358.0, 254.0, 355.0);
+    path_line_to(&mut ml, 254.0, 330.0);
+    path_close(&mut ml);
+    fill_path(c, &ml, 48, 24, 24, 255);
+    path_free(&mut ml);
+
+    // ── Left mouth curve ──
+    let mut mc1 = path_new();
+    path_move_to(&mut mc1, 254.0, 355.0);
+    path_cubic_to(&mut mc1, 240.0, 370.0, 210.0, 380.0, 200.0, 370.0);
+    path_cubic_to(&mut mc1, 198.0, 368.0, 208.0, 378.0, 222.0, 373.0);
+    path_cubic_to(&mut mc1, 238.0, 367.0, 252.0, 357.0, 254.0, 353.0);
+    path_close(&mut mc1);
+    fill_path(c, &mc1, 48, 24, 24, 255);
+    path_free(&mut mc1);
+
+    // ── Right mouth curve ──
+    let mut mc2 = path_new();
+    path_move_to(&mut mc2, 258.0, 355.0);
+    path_cubic_to(&mut mc2, 272.0, 370.0, 302.0, 380.0, 312.0, 370.0);
+    path_cubic_to(&mut mc2, 314.0, 368.0, 304.0, 378.0, 290.0, 373.0);
+    path_cubic_to(&mut mc2, 274.0, 367.0, 260.0, 357.0, 258.0, 353.0);
+    path_close(&mut mc2);
+    fill_path(c, &mc2, 48, 24, 24, 255);
+    path_free(&mut mc2);
+
+    // ── Whiskers ──
+    // Left whisker 1
+    let mut w1 = path_new();
+    path_move_to(&mut w1, 170.0, 335.0);
+    path_quad_to(&mut w1, 100.0, 320.0, 30.0, 310.0);
+    path_quad_to(&mut w1, 100.0, 325.0, 170.0, 338.0);
+    path_close(&mut w1);
+    fill_path(c, &w1, 32, 32, 32, 255);  // 0x202020FF
+    path_free(&mut w1);
+
+    // Left whisker 2
+    let mut w2 = path_new();
+    path_move_to(&mut w2, 170.0, 350.0);
+    path_quad_to(&mut w2, 95.0, 350.0, 25.0, 355.0);
+    path_quad_to(&mut w2, 95.0, 354.0, 170.0, 353.0);
+    path_close(&mut w2);
+    fill_path(c, &w2, 32, 32, 32, 255);
+    path_free(&mut w2);
+
+    // Left whisker 3
+    let mut w3 = path_new();
+    path_move_to(&mut w3, 172.0, 365.0);
+    path_quad_to(&mut w3, 105.0, 380.0, 35.0, 400.0);
+    path_quad_to(&mut w3, 105.0, 384.0, 172.0, 368.0);
+    path_close(&mut w3);
+    fill_path(c, &w3, 32, 32, 32, 255);
+    path_free(&mut w3);
+
+    // Right whisker 1
+    let mut w4 = path_new();
+    path_move_to(&mut w4, 342.0, 335.0);
+    path_quad_to(&mut w4, 412.0, 320.0, 482.0, 310.0);
+    path_quad_to(&mut w4, 412.0, 325.0, 342.0, 338.0);
+    path_close(&mut w4);
+    fill_path(c, &w4, 32, 32, 32, 255);
+    path_free(&mut w4);
+
+    // Right whisker 2
+    let mut w5 = path_new();
+    path_move_to(&mut w5, 342.0, 350.0);
+    path_quad_to(&mut w5, 417.0, 350.0, 487.0, 355.0);
+    path_quad_to(&mut w5, 417.0, 354.0, 342.0, 353.0);
+    path_close(&mut w5);
+    fill_path(c, &w5, 32, 32, 32, 255);
+    path_free(&mut w5);
+
+    // Right whisker 2
+    let mut w6 = path_new();
+    path_move_to(&mut w6, 342.0, 350.0);
+    path_quad_to(&mut w6, 417.0, 350.0, 487.0, 355.0);
+    path_quad_to(&mut w6, 417.0, 354.0, 342.0, 353.0);
+    path_close(&mut w6);
+    fill_path(c, &w6, 32, 32, 32, 255);
+    path_free(&mut w6);
+
+    // ── Eye highlights (small white circles) ──
+    let mut h1 = path_new();
+    let h1cx: f32 = 200.0;
+    let h1cy: f32 = 216.0;
+    let h1r: f32 = 6.0;
+    let h1k = 0.5523 * h1r;
+    path_move_to(&mut h1, h1cx + h1r, h1cy);
+    path_cubic_to(&mut h1, h1cx + h1r, h1cy + h1k, h1cx + h1k, h1cy + h1r, h1cx, h1cy + h1r);
+    path_cubic_to(&mut h1, h1cx - h1k, h1cy + h1r, h1cx - h1r, h1cy + h1k, h1cx - h1r, h1cy);
+    path_cubic_to(&mut h1, h1cx - h1r, h1cy - h1k, h1cx - h1k, h1cy - h1r, h1cx, h1cy - h1r);
+    path_cubic_to(&mut h1, h1cx + h1k, h1cy - h1r, h1cx + h1r, h1cy - h1k, h1cx + h1r, h1cy);
+    path_close(&mut h1);
+    fill_path(c, &h1, 255, 255, 255, 224);  // 0xFFFFFFE0
+    path_free(&mut h1);
+
+    let mut h2 = path_new();
+    let h2cx: f32 = 322.0;
+    let h2cy: f32 = 216.0;
+    let h2r: f32 = 6.0;
+    let h2k = 0.5523 * h2r;
+    path_move_to(&mut h2, h2cx + h2r, h2cy);
+    path_cubic_to(&mut h2, h2cx + h2r, h2cy + h2k, h2cx + h2k, h2cy + h2r, h2cx, h2cy + h2r);
+    path_cubic_to(&mut h2, h2cx - h2k, h2cy + h2r, h2cx - h2r, h2cy + h2k, h2cx - h2r, h2cy);
+    path_cubic_to(&mut h2, h2cx - h2r, h2cy - h2k, h2cx - h2k, h2cy - h2r, h2cx, h2cy - h2r);
+    path_cubic_to(&mut h2, h2cx + h2k, h2cy - h2r, h2cx + h2r, h2cy - h2k, h2cx + h2r, h2cy);
+    path_close(&mut h2);
+    fill_path(c, &h2, 255, 255, 255, 224);
+    path_free(&mut h2);
+
+    // Right whisker 3
+    // NOTE: Right whisker 3 is intentionally a quadrilateral (not whisker-shaped)
+    // to match the C golden image. The original bench_raster_c.c has this exact shape.
+    let mut w7 = path_new();
+    path_move_to(&mut w7, 340.0, 365.0);
+    path_quad_to(&mut w7, 407.0, 380.0, 477.0, 400.0);
+    path_quad_to(&mut w7, 407.0, 384.0, 340.0, 368.0);
+    path_close(&mut w7);
+    fill_path(c, &w7, 32, 32, 32, 255);
+    path_free(&mut w7);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Main — Benchmark Loop
+// ═══════════════════════════════════════════════════════════════
+
+fn main() -> i32 {
+    let width: i32 = 512;
+    let height: i32 = 512;
+    let warmup: i32 = 3;
+    let iterations: i32 = 20;
+
+    println("═══════════════════════════════════════════");
+    println("  Facet Tiger Benchmark — Salt (MLIR)");
+    println("═══════════════════════════════════════════");
+    println(f"Canvas: {width}x{height}, Iterations: {iterations}");
+
+    let mut c = canvas_new(width, height);
+    let mut checksum_acc: i64 = 0;
+
+    // Warmup
+    let mut wi: i32 = 0;
+    while wi < warmup {
+        canvas_clear_u32(&mut c, 404628735);  // 0x181820FF
+        build_tiger(&mut c);
+        wi = wi + 1;
+    }
+
+    // Timed iterations
+    let start = Instant::now();
+
+    let mut iter: i32 = 0;
+    while iter < iterations {
+        canvas_clear_u32(&mut c, 404628735);
+        build_tiger(&mut c);
+        checksum_acc = checksum_acc + canvas_checksum(&c);  // DCE guard
+        iter = iter + 1;
+    }
+
+    let elapsed = start.elapsed();
+    let elapsed_us = elapsed.as_nanos() / 1000;
+    let per_frame_us = elapsed_us / (iterations as i64);
+
+    println(f"  Total:      {elapsed_us} us ({iterations} frames)");
+    println(f"  Per frame:  {per_frame_us} us");
+
+    let fps = 1000000 / per_frame_us;
+    println(f"  Throughput: {fps} frames/sec");
+    println(f"  Checksum:   {checksum_acc} (DCE guard)");
+
+    // Golden image checksum
+    canvas_clear_u32(&mut c, 404628735);
+    build_tiger(&mut c);
+    let golden = canvas_checksum(&c);
+    println(f"  Golden:     {golden}");
+
+    canvas_free(&mut c);
+    return 0;
+}

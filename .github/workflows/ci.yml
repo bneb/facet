@@ -1,0 +1,20 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Z3
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev
+      - name: Build saltc
+        run: |
+          git clone --depth 1 https://github.com/bneb/salt /tmp/salt
+          cd /tmp/salt/salt-front
+          cargo build --release
+          echo "/tmp/salt/salt-front/target/release" >> $GITHUB_PATH
+      - name: Compile
+        run: make SALTC=saltc
+      - name: Test
+        run: make SALTC=saltc test

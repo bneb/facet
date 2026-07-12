@@ -1,0 +1,322 @@
+// Facet Raster — Salt Test Suite
+//
+// Validates path construction, Bézier flattening, fill correctness,
+// winding rules, and bounds safety. All tests run as a single binary.
+
+package main
+
+import std.core.ptr.Ptr
+import facet.raster
+
+extern fn exit(code: i32);
+
+// ═══════════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════════
+
+fn count_visible(c: &Canvas) -> i32 {
+    let mut count: i32 = 0;
+    let mut y: i32 = 0;
+    while y < c.height {
+        let mut x: i32 = 0;
+        while x < c.width {
+            if canvas_get_alpha(c, x, y) > 0 {
+                count = count + 1;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return count;
+}
+
+fn check(cond: bool, msg: i64) {
+    if !cond {
+        println(f"  FAIL test {msg}");
+        exit(1);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════
+
+fn test_path_create() {
+    let mut p = path_new();
+    check(p.count == 0, 1);
+    path_free(&mut p);
+    println("  [PASS] test_path_create");
+}
+
+fn test_path_commands() {
+    let mut p = path_new();
+    path_move_to(&mut p, 10.0, 20.0);
+    path_line_to(&mut p, 30.0, 40.0);
+    path_quad_to(&mut p, 50.0, 60.0, 70.0, 80.0);
+    path_cubic_to(&mut p, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
+    path_close(&mut p);
+    check(p.count == 5, 2);
+    check(p.cmds.offset(0).read().tag == CMD_MOVE_TO, 2);
+    check(p.cmds.offset(1).read().tag == CMD_LINE_TO, 2);
+    check(p.cmds.offset(2).read().tag == CMD_QUAD_TO, 2);
+    check(p.cmds.offset(3).read().tag == CMD_CUBIC_TO, 2);
+    check(p.cmds.offset(4).read().tag == CMD_CLOSE, 2);
+    path_free(&mut p);
+    println("  [PASS] test_path_commands");
+}
+
+fn test_path_growth() {
+    let mut p = path_new();
+    path_move_to(&mut p, 0.0, 0.0);
+    let mut i: i32 = 0;
+    while i < 500 {
+        path_line_to(&mut p, (i as f32), (i as f32) * 2.0);
+        i = i + 1;
+    }
+    check(p.count == 501, 3);
+    path_free(&mut p);
+    println("  [PASS] test_path_growth");
+}
+
+fn test_canvas_create() {
+    let mut c = canvas_new(100, 100);
+    check(c.width == 100, 4);
+    check(c.height == 100, 4);
+    check(c.stride == 400, 4);
+    let vis = count_visible(&c);
+    check(vis == 0, 4);
+    canvas_free(&mut c);
+    println("  [PASS] test_canvas_create");
+}
+
+fn test_canvas_clear() {
+    let mut c = canvas_new(10, 10);
+    canvas_clear(&mut c, 255, 0, 0, 255);
+    let px = canvas_get_pixel(&c, 0, 0);
+    check(px == 0xFF0000FF, 5);
+    let px2 = canvas_get_pixel(&c, 9, 9);
+    check(px2 == 0xFF0000FF, 5);
+    canvas_free(&mut c);
+    println("  [PASS] test_canvas_clear");
+}
+
+fn test_fill_rectangle() {
+    let mut c = canvas_new(50, 50);
+    let mut p = path_new();
+    path_move_to(&mut p, 10.0, 10.0);
+    path_line_to(&mut p, 30.0, 10.0);
+    path_line_to(&mut p, 30.0, 30.0);
+    path_line_to(&mut p, 10.0, 30.0);
+    path_close(&mut p);
+
+    fill_path_with_rule(&mut c, &p, 0, 255, 0, 255, 0);
+
+    let vis = count_visible(&c);
+    // 20x20 = 400 px, allow AA tolerance
+    check(vis >= 380 && vis <= 440, 6);
+    // Interior is green
+    let px = canvas_get_pixel(&c, 20, 20);
+    check(px == 0x00FF00FF, 6);
+    // Exterior transparent
+    check(canvas_get_alpha(&c, 5, 5) == 0, 6);
+
+    path_free(&mut p);
+    canvas_free(&mut c);
+    println("  [PASS] test_fill_rectangle");
+}
+
+fn test_fill_triangle() {
+    let mut c = canvas_new(100, 100);
+    let mut p = path_new();
+    path_move_to(&mut p, 50.0, 10.0);
+    path_line_to(&mut p, 90.0, 90.0);
+    path_line_to(&mut p, 10.0, 90.0);
+    path_close(&mut p);
+
+    fill_path_with_rule(&mut c, &p, 255, 0, 0, 255, 0);
+
+    let vis = count_visible(&c);
+    check(vis >= 2800 && vis <= 3600, 7);
+    check(canvas_get_alpha(&c, 50, 50) > 0, 7);
+    check(canvas_get_alpha(&c, 0, 0) == 0, 7);
+    check(canvas_get_alpha(&c, 99, 0) == 0, 7);
+
+    path_free(&mut p);
+    canvas_free(&mut c);
+    println("  [PASS] test_fill_triangle");
+}
+
+fn test_fill_circle() {
+    let r: f32 = 40.0;
+    let cx: f32 = 50.0;
+    let cy: f32 = 50.0;
+    let k: f32 = 0.5523 * r;
+
+    let mut c = canvas_new(100, 100);
+    let mut p = path_new();
+    path_move_to(&mut p, cx + r, cy);
+    path_cubic_to(&mut p, cx + r, cy + k, cx + k, cy + r, cx, cy + r);
+    path_cubic_to(&mut p, cx - k, cy + r, cx - r, cy + k, cx - r, cy);
+    path_cubic_to(&mut p, cx - r, cy - k, cx - k, cy - r, cx, cy - r);
+    path_cubic_to(&mut p, cx + k, cy - r, cx + r, cy - k, cx + r, cy);
+    path_close(&mut p);
+
+    fill_path_with_rule(&mut c, &p, 0, 0, 255, 255, 0);
+
+    let vis = count_visible(&c);
+    check(vis >= 4775 && vis <= 5280, 8);
+    check(canvas_get_alpha(&c, 50, 50) > 0, 8);
+    check(canvas_get_alpha(&c, 0, 0) == 0, 8);
+
+    path_free(&mut p);
+    canvas_free(&mut c);
+    println("  [PASS] test_fill_circle");
+}
+
+fn test_fill_empty() {
+    let mut c = canvas_new(50, 50);
+    let p = path_new();
+    fill_path_with_rule(&mut c, &p, 255, 0, 0, 255, 0);
+    let vis = count_visible(&c);
+    check(vis == 0, 9);
+    canvas_free(&mut c);
+    println("  [PASS] test_fill_empty");
+}
+
+fn test_fill_bounds() {
+    let mut c = canvas_new(50, 50);
+    let mut p = path_new();
+    path_move_to(&mut p, -100.0, -100.0);
+    path_line_to(&mut p, 200.0, -100.0);
+    path_line_to(&mut p, 200.0, 200.0);
+    path_line_to(&mut p, -100.0, 200.0);
+    path_close(&mut p);
+
+    fill_path_with_rule(&mut c, &p, 255, 0, 0, 255, 0);
+
+    let vis = count_visible(&c);
+    check(vis == 2500, 10);
+
+    path_free(&mut p);
+    canvas_free(&mut c);
+    println("  [PASS] test_fill_bounds");
+}
+
+fn test_winding_nonzero() {
+    let mut c = canvas_new(100, 100);
+    let mut p = path_new();
+    // Outer
+    path_move_to(&mut p, 10.0, 10.0);
+    path_line_to(&mut p, 90.0, 10.0);
+    path_line_to(&mut p, 90.0, 90.0);
+    path_line_to(&mut p, 10.0, 90.0);
+    path_close(&mut p);
+    // Inner (same direction)
+    path_move_to(&mut p, 30.0, 30.0);
+    path_line_to(&mut p, 70.0, 30.0);
+    path_line_to(&mut p, 70.0, 70.0);
+    path_line_to(&mut p, 30.0, 70.0);
+    path_close(&mut p);
+
+    fill_path_with_rule(&mut c, &p, 255, 255, 255, 255, 0);
+    check(canvas_get_alpha(&c, 50, 50) > 0, 11);
+
+    path_free(&mut p);
+    canvas_free(&mut c);
+    println("  [PASS] test_winding_nonzero");
+}
+
+fn test_winding_evenodd() {
+    let mut c = canvas_new(100, 100);
+    let mut p = path_new();
+    // Outer
+    path_move_to(&mut p, 10.0, 10.0);
+    path_line_to(&mut p, 90.0, 10.0);
+    path_line_to(&mut p, 90.0, 90.0);
+    path_line_to(&mut p, 10.0, 90.0);
+    path_close(&mut p);
+    // Inner (same direction)
+    path_move_to(&mut p, 30.0, 30.0);
+    path_line_to(&mut p, 70.0, 30.0);
+    path_line_to(&mut p, 70.0, 70.0);
+    path_line_to(&mut p, 30.0, 70.0);
+    path_close(&mut p);
+
+    fill_path_with_rule(&mut c, &p, 255, 255, 255, 255, 1);
+    check(canvas_get_alpha(&c, 50, 50) == 0, 12);
+    check(canvas_get_alpha(&c, 15, 15) > 0, 12);
+
+    path_free(&mut p);
+    canvas_free(&mut c);
+    println("  [PASS] test_winding_evenodd");
+}
+
+fn test_two_subpaths() {
+    let mut c = canvas_new(100, 50);
+    let mut p = path_new();
+    // Left triangle
+    path_move_to(&mut p, 10.0, 10.0);
+    path_line_to(&mut p, 40.0, 10.0);
+    path_line_to(&mut p, 25.0, 40.0);
+    path_close(&mut p);
+    // Right triangle
+    path_move_to(&mut p, 60.0, 10.0);
+    path_line_to(&mut p, 90.0, 10.0);
+    path_line_to(&mut p, 75.0, 40.0);
+    path_close(&mut p);
+
+    fill_path_with_rule(&mut c, &p, 255, 255, 0, 255, 0);
+
+    check(canvas_get_alpha(&c, 25, 25) > 0, 13);
+    check(canvas_get_alpha(&c, 75, 25) > 0, 13);
+    check(canvas_get_alpha(&c, 50, 25) == 0, 13);
+
+    path_free(&mut p);
+    canvas_free(&mut c);
+    println("  [PASS] test_two_subpaths");
+}
+
+fn test_quad_curve() {
+    let mut c = canvas_new(100, 100);
+    let mut p = path_new();
+    path_move_to(&mut p, 10.0, 50.0);
+    path_quad_to(&mut p, 50.0, 10.0, 90.0, 50.0);
+    path_line_to(&mut p, 90.0, 90.0);
+    path_line_to(&mut p, 10.0, 90.0);
+    path_close(&mut p);
+
+    fill_path_with_rule(&mut c, &p, 255, 0, 255, 255, 0);
+
+    check(canvas_get_alpha(&c, 50, 80) > 0, 14);
+    check(canvas_get_alpha(&c, 50, 5) == 0, 14);
+
+    path_free(&mut p);
+    canvas_free(&mut c);
+    println("  [PASS] test_quad_curve");
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Main
+// ═══════════════════════════════════════════════════════════════
+
+fn main() -> i32 {
+    println("=== Facet Raster Tests ===");
+
+    test_path_create();
+    test_path_commands();
+    test_path_growth();
+    test_canvas_create();
+    test_canvas_clear();
+    test_fill_rectangle();
+    test_fill_triangle();
+    test_fill_circle();
+    test_fill_empty();
+    test_fill_bounds();
+    test_winding_nonzero();
+    test_winding_evenodd();
+    test_two_subpaths();
+    test_quad_curve();
+
+    println("=== All 14 tests passed ===");
+    return 0;
+}
